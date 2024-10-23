@@ -1,0 +1,229 @@
+edition: 3.0.0
+name: modelscope-app
+# access是当前应用所需要的密钥信息配置：
+# 密钥配置请参见：https://www.serverless-devs.com/serverless-devs/command/config
+# 密钥使用请参见：https://www.serverless-devs.com/serverless-devs/tool
+access: undefined
+
+vars: # 全局变量
+  region: cn-hangzhou
+  version: fc-deploy-common-v17.3.3
+  name: ms-fc-cccad8a5-1d57
+  role: acs:ram::1292819719255986:role/aliyunfcserverlessdevsrole
+  instanceType: fc.gpu.tesla.1
+  gpuMemorySize: 16384
+  memorySize: 8192
+  modelID: iic/cv_convnext-base_image-classification_garbage
+  modelRevision: v1.0.2
+  modelTask: image-classification
+  modelAccessToken: 265c3ec7-7f3c-453a-a3e0-f0babda147a1
+  modelCache: modelsce-mirror-modelsce-mirror-txpzbgwcck.cn-hangzhou-vpc.fcapp.run
+  subModelFile: gemma-2-9b-it-Q5_K_L.gguf
+  templateFile: llm_template/ollama/gemma2.modelfile
+  modelBackend: pipeline
+  deployEnv: '{}'
+resources:
+  model_cache:
+    component: 'fc3'
+    props:
+      region: ${vars.region}
+      role: ${vars.role}
+      functionName: ${vars.name}-model-cache
+      description: modelscope model cache helper, dont' invoke
+      handler: index.handler
+      instanceType: e1
+      runtime: python3.9
+      code: ./model_cache
+      vpcConfig: auto
+      nasConfig: auto
+
+  model_download_func:
+    component: 'fc3'
+    actions:
+      complete-deploy:
+        - run: sleep 30    # wait nas ready
+        - component: fc3@0.0.23 invoke
+    props:
+      region: ${vars.region}
+      role: ${vars.role}
+      functionName: ${vars.name}-model-download-func
+      description: initialize model into nas storage
+      handler: index.handler
+      timeout: 86400
+      memorySize: 16384
+      cpu: 8
+      diskSize: 10240
+      instanceType: e1
+      instanceConcurrency: 1
+      runtime: python3.9
+      code: ./model_download
+      internetAccess: true
+      vpcConfig: ${resources.model_cache.output.vpcConfig}
+      nasConfig: ${resources.model_cache.output.nasConfig}
+      environmentVariables:
+        MODEL_ID: ${vars.modelID}
+        MODEL_VERSION: ${vars.modelRevision}
+        MODELSCOPE_CACHE: ${resources.model_cache.output.nasConfig.mountPoints.0.mountDir}
+        MODELSCOPE_TOKEN: ${vars.modelAccessToken}
+        MODELSCOPE_DOMAIN: ${vars.modelCache}
+        IMAGE_TAG: ${vars.version}
+        SUB_MODEL_FILE: ${vars.subModelFile}
+        TEMPLATE_FILE_URL: https://modelscope.oss-cn-beijing.aliyuncs.com/${vars.templateFile}
+        MODEL_BACKEND: ${vars.modelBackend}
+
+  model_meta_func:
+    component: 'fc3'
+    props:
+      region: ${vars.region}
+      role: ${vars.role}
+      functionName: ${vars.name}-model-meta-func
+      description: Meta Api
+      handler: index.handler
+      timeout: 86400
+      memorySize: 32768
+      cpu: 8
+      instanceType: e1
+      diskSize: 10240
+      instanceConcurrency: 1
+      runtime: custom.debian10
+      code: ./model_meta
+      internetAccess: true
+      initializer: 'true'
+      environmentVariables:
+        MODEL_ID: ${vars.modelID}
+        MODEL_VERSION: ${vars.modelRevision}
+        TASK: ${vars.modelTask}
+        PATH: /opt/python3.9/bin:/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/bin
+        PYTHONPATH: /opt/python
+      customRuntimeConfig:
+        command:
+          - python3.9
+        args:
+          - "app.py"
+        port: 9000
+      layers:
+        - acs:fc:${vars.region}:official:layers/Python39/versions/2
+        - acs:fc:${vars.region}:1431999136518149:layers/Python39-Gradio/versions/1
+      triggers:
+        - triggerName: httpTrigger
+          triggerType: http
+          description: 'httpTriggerMeta'
+          qualifier: LATEST
+          triggerConfig:
+            authType: anonymous
+            disableURLInternet: false
+            methods:
+              - GET
+
+  t_basic_func:
+    component: 'fc3'
+    props:
+      region: ${vars.region}
+      role: ${vars.role}
+      functionName: ${vars.name}-model-app-func
+      description: Deploy ModelScope applications of model
+      handler: not-used
+      timeout: 86400
+      memorySize: ${vars.memorySize}
+      cpu: 4
+      diskSize: 10240
+      gpuConfig:
+        gpuMemorySize: ${vars.gpuMemorySize}
+        gpuType: ${vars.instanceType}
+      instanceConcurrency: 4
+      runtime: custom-container
+      initializer: 'true'
+      initializationTimeout: 300
+      internetAccess: true
+      vpcConfig: ${resources.model_cache.output.vpcConfig}
+      nasConfig: ${resources.model_cache.output.nasConfig}
+      customContainerConfig:
+        image: registry.${vars.region}.aliyuncs.com/modelscope-repo/modelscope:${vars.version}
+        command: ["/bin/sh", "-c", "wget https://modelscope.oss-cn-beijing.aliyuncs.com/swingdeploy/deploy.tar; tar xvf deploy.tar; /bin/bash script/run_${vars.modelBackend}.sh"]
+        port: 9000
+      environmentVariables:
+        MODEL_ID: ${vars.modelID}
+        MODEL_VERSION: ${vars.modelRevision}
+        MODELSCOPE_CACHE: ${resources.model_cache.output.nasConfig.mountPoints.0.mountDir}/
+        MODELSCOPE_TOKEN: ${vars.modelAccessToken}
+        TASK: ${vars.modelTask}
+        IMAGE_TAG: ${vars.version}
+        SUB_MODEL_FILE: ${vars.subModelFile}
+        TEMPLATE_FILE_URL: https://modelscope.oss-cn-beijing.aliyuncs.com/${vars.templateFile}
+        MODELSCOPE_DOMAIN: ${vars.modelCache}
+        MODEL_BACKEND: ${vars.modelBackend}
+        DEPLOY_ENV: '${vars.deployEnv}'
+      triggers:
+        - triggerName: httpTrigger
+          triggerType: http
+          description: 'httpTriggerModel'
+          qualifier: LATEST
+          triggerConfig:
+            authType: anonymous
+            disableURLInternet: false
+            methods:
+              - GET
+              - POST
+              - PUT
+
+  model_ui_func:
+    component: 'fc3'
+    props:
+      region: ${vars.region}
+      role: ${vars.role}
+      functionName: ${vars.name}-model-ui-func
+      description: model ui web page
+      handler: index.handler
+      timeout: 600
+      memorySize: 1024
+      instanceType: e1
+      runtime: custom.debian10
+      code: ./model_ui
+      instanceConcurrency: 100
+      internetAccess: true
+      environmentVariables:
+        MODEL_ID: ${vars.modelID}
+        MODEL_VERSION: ${vars.modelRevision}
+        TASK: ${vars.modelTask}
+        PATH: /opt/python3.9/bin:/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/bin
+        PYTHONPATH: /opt/python
+        API_URL: ${resources.t_basic_func.output.url.system_url}
+      customRuntimeConfig:
+        command:
+          - python3.9
+        args:
+          - "app.py"
+        port: 7860
+      layers:
+        - acs:fc:${vars.region}:official:layers/Python39/versions/2
+        - acs:fc:${vars.region}:1431999136518149:layers/Python39-Gradio/versions/1
+      triggers:
+        - triggerName: httpTrigger
+          triggerType: http
+          description: 'httpTriggerUI'
+          qualifier: LATEST
+          triggerConfig:
+            authType: anonymous
+            disableURLInternet: false
+            methods:
+              - GET
+              - POST
+              - PUT
+
+  model_ui_func_domain:
+    component: 'fc3-domain'
+    props:
+      region: ${vars.region}
+      domainName: auto
+      protocol: HTTP
+      routeConfig:
+        routes:
+          - functionName: ${resources.model_ui_func.props.functionName}
+            methods:
+              - GET
+              - POST
+              - PUT
+              - DELETE
+              - OPTIONS
+            path: /*
+            qualifier: LATEST
